@@ -1,0 +1,253 @@
+---
+title: "DATA 607 - Final Project"
+author: "Simon U."
+date: "May 13, 2018"
+output: html_document
+params:
+  api_token: Enter Socrata API token for NYC OpenData
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+options(api_key = params$api_token)
+#options(api_key = "xyz123")
+```
+
+###Project Proposal: ***"Queens Boulevard traffic improvements and road safety"***
+For my final project I'd like to use data on pedestrian and motor vehicles accidents published by the City of New York as part of the [NYC OpenData website](https://opendata.cityofnewyork.us/).  Being a resident of Queens, NY, it concerned me that Queens Boulevard at some point in the past was labeled as "Boulevard of Death", being one of the most dangerous, widest and challenging roadways to cross for pedestrians.  I have witnessed numerous improvements done over the years along this roadway and so I'd like to use what I've learned in Data Science so far (in terms of data acquisition, transformation, visualization and gathering statistics) in order to determine whether there was a ROI (return on investment) and therefore any significant drop in ***pedestrian*** related accidents.
+
+Below is an outline of Data Sources I plan to use in order to extract accidents related data, to draw statistics from and to reach my conclusions:
+
+  * NYC OpenData (Public Safety) [NYPD Motor Vehicle Collisions](https://data.cityofnewyork.us/Public-Safety/NYPD-Motor-Vehicle-Collisions/h9gi-nx95)  
+  * NYC OpenData API, powered by [Socrata](https://dev.socrata.com/foundry/data.cityofnewyork.us/qiz3-axqb)  
+  * News articles which may provide information on what roadwork was done and when  
+  * Other interesting data to look at  
+      + NYC accidents [heat map](https://data.cityofnewyork.us/Public-Safety/NYC-accidents-heat-map/ehqi-g294) and associated data  
+      + [Pedestrians](http://www.nyc.gov/html/dot/html/pedestrians/pedestrians.shtml) related site at NYC DOT  
+
+***
+
+####Libraries
+```{r libs, warning=FALSE, message=FALSE}
+library(RSocrata)
+library(tidyverse)
+library(httr)
+library(magrittr)
+library(lubridate)
+library(kableExtra)
+```
+
+####Initialization
+```{r init}
+work.dir <- "~/R/Final Project/"
+work.file <- "qb_data.csv"
+isFirstRun <- !file.exists(file.path(work.dir, work.file))
+```
+
+***
+
+###Data Acquisition
+The [NYPD Motor Vehicle Collisions](https://data.cityofnewyork.us/Public-Safety/NYPD-Motor-Vehicle-Collisions/h9gi-nx95) site offers to download the complete dataset on collisions starting from July 1^st^ 2012 to present time, as a CSV file,  [NYPD_Collision_DataDictionary.xlsx](https://data.cityofnewyork.us/api/views/h9gi-nx95/files/b5fd8e71-ca48-4e96-bf63-1b8a7c4cc47b?download=true&filename=Collision_DataDictionary.xlsx).  The file is currently at over 270MB in size and therefore can be problematic to work with.  I decided to look for other ways to get the data that I needed.  Since I only needed to focus on the data for "Queens Boulevard", I started to look into the API offered by the site and to see if there was a filtering mechanism to let me extract and download the subset of the data which I was after.
+
+#####Importing data via **SODA API** - The ***Socrata Open Data API*** (SODA) provides programmatic access to data including the ability to filter, query, and aggregate.
+
+NOTE: The API requires an API token.  Use *"Knit with Parameters..."* to supply value for api_token parameter or set api_key using environment options, such as options(api_key = "xyz123")  
+
+Declare a function, called **read.socrata.by.starts_with** which would query the API given a field name and a text value that the field would start with.  This function will be useful, since the street name, "QUEENS BOULEVARD", can be found in the following three different fields of the dataset:
+
+  * "on_street_name"
+  * "off_street_name"
+  * "cross_street_name"
+
+```{r apy_qry_function}
+read.socrata.by.starts_with <- function(colname, starts_with_value) {
+  base.url <- "https://data.cityofnewyork.us/resource/qiz3-axqb.json"
+  param <- str_c("?$where=starts_with(", colname, ", '", starts_with_value, "')") %>% URLencode()
+  qry.url <- str_c(base.url, param)
+  return (read.socrata(qry.url, app_token = getOption("api_key")))
+}
+```
+Make the calls to the API and combine the results into one data frame. 
+```{r call_api}
+if (isFirstRun) {
+  df.on <- read.socrata.by.starts_with("on_street_name", "QUEENS BOULEVARD")
+  df.off <- read.socrata.by.starts_with("off_street_name", "QUEENS BOULEVARD")
+  df.cross <- read.socrata.by.starts_with("cross_street_name", "QUEENS BOULEVARD")
+  df.all <- bind_rows(df.on, df.off) %>% bind_rows(df.cross)
+  glimpse(df.all)
+}
+```
+
+NOTE: The glimpse into the attributes of the data frame shows that the *"location.coordinates"* column is of type '<list>' of coordinate values.  This will need to be converted to a simpler represantation such as a string in order to save the data frame into a CSV file for subsequent processing
+```{r save_to_csv}
+if (isFirstRun) {
+  # convert location.coordinates list into a string of CSV values and also converting empty strings to NA
+  df.all$location.coordinates %<>% lapply(str_c, collapse = ",") %>% 
+    lapply(function(x) if(identical(x, character(0))) NA_character_ else x) %>% as.character()
+  write.csv(df.all, file =  file.path(work.dir, work.file))
+}
+```
+
+Load data back from CSV file prior to analysis
+```{r load_from_csv}
+df.all <- read.csv(file = file.path(work.dir, work.file), stringsAsFactors = FALSE)
+glimpse(df.all)
+```
+
+***
+
+###Data Transformation, Visualization and Analysis
+Filter the data where there are pedestrians either injured or killed as a result of an accident.
+```{r filter_pedestrian_data}
+df <- df.all %>% filter(number_of_pedestrians_injured > 0 | number_of_pedestrians_killed > 0)
+```
+Convert the *date* column into *Date* type for better processing using the **lubridate** package
+```{r type_conversion}
+#Convert "date" column from <chr> to <Date> type
+df$date %<>%  as.Date()
+glimpse(df$date)
+```
+
+####Summary of accidents over the years
+Here, I group the data by each year to see a trend of total number of pedestrian related accidents.  The data for 2012 and 2018 can be ignored, since we don't have the complete set of data for those years.
+```{r year_sum}
+df.y <- df %>% group_by(year = year(date)) %>% 
+  summarise(ped_killed = sum(number_of_pedestrians_killed),
+            ped_accidents = sum(number_of_pedestrians_injured + number_of_pedestrians_killed))
+#For every year, find percentage difference from the year before
+df.y %<>% mutate(pct_diff = round(((ped_accidents - lag(ped_accidents)) / lag(ped_accidents)) * 100))
+
+kable_styling(knitr::kable(df.y, "html", caption = "Accidents by Year"), bootstrap_options = "striped")
+
+ggplot(df.y, mapping = aes(x = year, y = ped_accidents)) +
+  geom_col() +
+  geom_text(aes(label = ped_accidents, y = ped_accidents), vjust = -0.5) +
+  labs(title = "Accidents by Year", x = "Years", y = "Total Pedestrian Accidents")
+```
+
+The data shows that there is indeed a significant reduction (nearly by half) in pedestrian related accidents.  There were no fatalities since 2014 and the percentage drops in total pedestrian accidents were in double digits every year for consecutive 3 years since 2013.  This shows that the measures taken by the city to improve safety on Queens Boulevard paid off with good results, especially if we also consider growing population of residents and drivers on the road.
+
+***
+
+###Additional Exploratory Data Analysis
+
+After answering my main question, I decided to do some additional exploration and see what else the data can reveal if I zoom in on the data a bit more.
+
+I start off with some Date based analysis.
+
+####Summary by Quarter of each year  
+using the ***lubridate::floor_date(date, "quarter")*** function
+```{r}
+df.q <- df %>% group_by(year = year(date), quarter = floor_date(date, "quarter")) %>% 
+  summarise(ped_accidents = sum(number_of_pedestrians_injured + number_of_pedestrians_killed))
+df.q
+ggplot(df.q, mapping = aes(x = quarter, y = ped_accidents)) +
+  geom_line() +
+  geom_text(aes(label = ped_accidents, y = ped_accidents), vjust = -0.5) +
+  labs(title = "Accidents by Quarter", x = "Quarters", y = "Total Pedestrian Accidents")
+```
+
+The data seems to show a somewhat downward trend but overrall it doesn't appear to be revealing much.
+
+Next step is to try to summarize and plot the data by month (similarly, by using the ***floor_date()*** function).
+```{r}
+df.m <- df %>% group_by(month = floor_date(date, "month")) %>% 
+  summarise(ped_accidents = sum(number_of_pedestrians_injured + number_of_pedestrians_killed))
+df.m
+ggplot(df.m, mapping = aes(x = month, y = ped_accidents)) +
+  geom_line() +
+  #geom_text(aes(label = ped_accidents, y = ped_accidents), vjust = -0.5) +
+  labs(title = "Accidents by Month", x = "Months", y = "Total Pedestrian Accidents")
+```
+
+Now the data revealed a slightly better pattern that the number of accidents spike around the end or the start of a year.  This led me to do one more date-based analysis by grouping dates into seasons.
+
+I wrote a function, called ***"season"*** which would take a date or a vector of dates and would translate that into one of the seasons (WINTER, SPRING, SUMMER, and AUTUMN)
+```{r}
+season <- function(dt) {
+  unlist(
+    lapply(dt, function(d) {
+      if (month(d) %in% c(12, 1, 2)) {"WINTER"}
+      else if (month(d) %in% c(3, 4, 5)) {"SPRING"}
+      else if (month(d) %in% c(6, 7, 8)) {"SUMMER"}
+      else if (month(d) %in% c(9, 10, 11)) {"AUTUMN"}    
+    })
+  )
+}
+```
+
+Here's what the data looks like, grouped by seasons
+```{r}
+df.s <- df %>% group_by(season = season(date)) %>% 
+  summarise(ped_accidents = sum(number_of_pedestrians_injured + number_of_pedestrians_killed))
+df.s
+ggplot(df.s, mapping = aes(x = season, y = ped_accidents)) +
+  geom_col() +
+  geom_text(aes(label = ped_accidents, y = ped_accidents), vjust = -0.5) +
+  labs(title = "Accidents by Season", x = "Seasons", y = "Total Pedestrian Accidents")
+```
+
+This now strongly suggests that "bad" weather such as rain or snow is a contributing factor to the accidents.
+
+Next I decided to do a time-based analysis and to group the data by a day-time period.
+I broke up 24 hours into the following 4 categories:  
+  1.  AM RUSH - Morning Rush Hours (6:00AM - 9:59AM)  
+  2.  MIDDAY  - (10:00AM - 4:59PM)  
+  3.  PM RUSH - Evening Rush Hours (5:00PM - 8:59PM)  
+  4.  NIGHT   - (9:00PM - 5:59AM)  
+
+I wrote a function, called ***hour_of_day*** which would take an integer between 0 and 24 (or a vector of such values) and would translate that into one of the 4 categories above.  A similar function, called ***time_of_day*** would take a parameter of type Date, extract the hour value from it and call the hour_of_day function to do the same translation.
+```{r}
+hour_of_day <- function(hr) {
+  unlist(
+    lapply(hr, function(h) {
+      if (between(h, 6, 9)) {"AM RUSH"}
+      else if (between(h, 10, 16)) {"MIDDAY"}
+      else if (between(h, 17, 20)) {"PM RUSH"}
+      else if (between(h, 21, 24) || between(h, 0, 5)) {"NIGHT"}    
+    })
+  )
+}
+time_of_day <- function(dt) {
+  hour_of_day(hour(dt))
+}
+```
+
+The data contained separate columns for date and time values.  I decided to combine them into one column using the ***lubridate::ymd_hm()*** function inside the ***mutate()*** function call.  
+Then using the time of day classificaiton on the new date-time column, here's what the data looks like:
+```{r}
+df.h <- df %>% mutate(date_time = ymd_hm(str_c(date, time, sep = " "))) %>% 
+  group_by(time_of_day = time_of_day(date_time)) %>% 
+  summarise(ped_accidents = sum(number_of_pedestrians_injured + number_of_pedestrians_killed))
+df.h
+ggplot(df.h, mapping = aes(x = time_of_day, y = ped_accidents)) +
+  geom_col() +
+  geom_text(aes(label = ped_accidents, y = ped_accidents), vjust = -0.5) +
+  labs(title = "Accidents by Time of Day", x = "Day Periods", y = "Total Pedestrian Accidents")
+```
+
+The results appeared somewhat counterintuitive to me.  First, I wouldn't expect the morning rush hour having nearly half the total number of accidents than the evening rush hour.  I would expect the two periods to have more evenly distributed numbers, guessing the morning to have even more rather than less the number of accidents.  Finaly, a more surprising revelation to me was that most accidents fall into the midday category.  This led me to hypothesize, that perhaps most accidents involved elderly and/or students.  Unfortunately the data does not include age of pedestrians which would help confirm the hypothesis.
+
+
+As for my final analysis on the data, I wanted to see which factors most contributed to the pedestrian accidents.  The dataset contains 5 "contributing_factor_vehicle" columns, however the fist one "contributing_factor_vehicle_1" had the most information and the others were mostly blank or unspecified.  Here's the plot of the data sorted by the most influential (top 14) factors.
+```{r}
+df %>% group_by(contributing_factor_vehicle_1) %>%  
+  summarize(cnt = sum(number_of_pedestrians_injured + number_of_pedestrians_killed)) %>% 
+  top_n(14, cnt) %>% 
+  ggplot(mapping = aes(x = reorder(contributing_factor_vehicle_1, cnt), cnt)) +
+  geom_bar(stat = 'identity', position = 'dodge') +
+  coord_flip() +
+  geom_text(aes(label = cnt, y = cnt + 12), vjust = 0.25) +
+  labs(title = "Most Contributing Factors", x = "", y = "Total Pedestrian Accidents")
+```
+
+The chart shows that a lot of the factors were unspecified.  However the two most frequent causes of the accidents were driver's *"Failure to Yield"* and *"Inattention or Distraction"*  
+
+***
+
+***New skills and experiences***  
+
+* Socrata API  
+* lubridate package  
+* advancing on charting features  
